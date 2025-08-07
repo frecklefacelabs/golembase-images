@@ -1,0 +1,25 @@
+<div class="gallery-container">
+  <h2>Image Gallery</h2>
+
+  <!-- 
+    If there are IDs, show the grid; otherwise, show the loading message.
+  -->
+  @if (thumbnailIds.length > 0) {
+    <div class="gallery-grid">
+      @for (id of thumbnailIds; track id) {
+        <div class="gallery-item">
+          <!-- Added a (click) event to call the onImageClick method -->
+          <img 
+            [src]="backendUrl + '/image/' + id" 
+            [alt]="'Image with ID ' + id"
+            (error)="onImageError($event)"
+            (click)="onImageClick(id)"
+          >
+        </div>
+      }
+    </div>
+  } @else {
+    <!-- This block is shown while the thumbnailIds array is empty -->
+    <p>Loading images...</p>
+  }
+</div>

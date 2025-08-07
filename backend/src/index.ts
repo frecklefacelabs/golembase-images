@@ -128,15 +128,54 @@ app.get('/', (req, res) => {
 // More:
 // get images within a certain date range (once that's working)
 
-app.get('/image/:id', async (req, res) => {
-    console.log('here')
+app.get('/thumbnails', async (req, res) => {
+    // todo: Consider building an index, as pulling back all the thumbnail data via query is a lot of unnecessary overhead
+    const thumbs = await client.queryEntities(
+        'type="thumbnail" && app="golem-images-0.1"'
+    )
+    res.send(
+        thumbs.map((item) => {
+            return item.entityKey
+        })
+    )
+})
+
+app.get('/parent/:thumbid', async (req, res) => {
+    let id: string = req.params.thumbid
+
     // Prepend '0x' if it's missing
+    if (!id.startsWith('0x')) {
+        id = '0x' + id
+    }
+
+    // Get the metadata
+
+    const metadata = await client.getEntityMetaData(id as Hex)
+    if (metadata) {
+        for (let annot of metadata.stringAnnotations) {
+            if (annot.key == 'parent') {
+                // Not sure yet, let's just return the parent key for now and see how that works
+                res.send(annot.value)
+                return
+            }
+        }
+        // No parent key found
+        res.status(404)
+        res.send('not found')
+        return
+    } else {
+        res.status(404)
+        res.send('not found')
+        return
+    }
+})
+
+app.get('/image/:id', async (req, res) => {
     let id: string = req.params.id
 
     // Prepend '0x' if it's missing
     if (!id.startsWith('0x')) {
         id = '0x' + id
-        console.log('Updated id with 0x:', id)
     }
 
     // Grab the metadata
@@ -203,6 +242,8 @@ app.get('/image/:id', async (req, res) => {
 
 app.post('/upload', upload.single('imageFile'), async (req, res) => {
     try {
+        let entity_key = ''
+
         // --- 1. VALIDATE THE INPUT ---
         // Check if a file was uploaded
         if (!req.file) {
@@ -223,6 +264,15 @@ app.post('/upload', upload.single('imageFile'), async (req, res) => {
 
         let stringAnnotations = []
         let numericAnnotations = []
+
+        // Add each tag individually.
+        const tag_list = tags
+            .split(',') // split by commas
+            .map((tag) => tag.trim()) // remove leading/trailing space
+            .filter((tag) => tag.length > 0) // remove empty strings resulting from multiple commas
+        for (let tag of tag_list) {
+            stringAnnotations.push(new Annotation('key', tag))
+        }
 
         for (let i = 1; i <= 3; i++) {
             const key = req.body[`custom_key${i}`]
@@ -245,9 +295,13 @@ app.post('/upload', upload.single('imageFile'), async (req, res) => {
 
         // --- 3. RESIZE THE IMAGE USING SHARP ---
         // sharp takes the buffer, resizes it, and outputs a new buffer
-        console.log('Resizing image to 100px width...')
+        console.log('Resizing image to 60px width...')
         const resizedImageBuffer = await sharp(originalImageBuffer)
-            .resize({ width: 100 }) // Width is 100px, height is auto-scaled
+            .resize({
+                width: 100,
+                height: 100,
+                fit: 'inside', // This ensures the image is resized to fit within a 100x100 box
+            })
             .toBuffer()
         console.log(`Resized image size: ${resizedImageBuffer.length} bytes`)
 
@@ -302,6 +356,7 @@ app.post('/upload', upload.single('imageFile'), async (req, res) => {
             let hash = receipts_main[0].entityKey
             console.log('Receipts for main:')
             console.log(receipts_main)
+            entity_key = receipts_main[0].entityKey
 
             // Now if there are more chunks for the larger files, build creates for them.
 
@@ -399,6 +454,7 @@ app.post('/upload', upload.single('imageFile'), async (req, res) => {
             originalSize: originalImageBuffer.length,
             resizedSize: resizedImageBuffer.length,
             tags: tags,
+            entity_key: entity_key,
         })
     } catch (error) {
         console.error('Error processing image:', error)
