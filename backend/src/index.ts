@@ -3,6 +3,7 @@ import cors from 'cors'
 import multer from 'multer'
 import sharp from 'sharp'
 import { writeFile } from 'fs/promises'
+import { inspect } from 'util'
 import {
     AccountData,
     Annotation,
@@ -12,6 +13,7 @@ import {
     Tagged,
 } from 'golem-base-sdk'
 import { readFileSync } from 'fs'
+import { buffer } from 'stream/consumers'
 
 const app = express()
 const port = 3000
@@ -219,18 +221,35 @@ app.post('/upload', upload.single('imageFile'), async (req, res) => {
             .toBuffer()
         console.log(`Resized image size: ${resizedImageBuffer.length} bytes`)
 
+        // Break into chunks if it's too big
+
+        const chunks: Buffer[] = []
+
+        const chunkSize = 50000
+
+        for (let i = 0; i < originalImageBuffer.length; i += chunkSize) {
+            const chunk = Buffer.from(
+                originalImageBuffer.subarray(i, i + chunkSize)
+            )
+            chunks.push(chunk)
+        }
+
+        console.log(`Number of chunks: ${chunks.length}`)
+
+        for (let chunk of chunks) {
+            console.log(chunk.length)
+        }
+
         // --- 4. PREPARE DATA FOR YOUR DATABASE ---
 
-        console.log('Data is ready to be saved to the database.')
-
         try {
-            // We have to do these creates sequentially, as we need the returned hash to be used in the thumbnail.
+            // We have to do these creates sequentially, as we need the returned hash to be used in the thumbnail (and additional parts if needed).
             let creates_main: GolemBaseCreate[] = [
                 {
-                    data: originalImageBuffer,
+                    data: chunks[0],
                     btl: 25,
                     stringAnnotations: [
-                        new Annotation('type', 'thumbnail'),
+                        new Annotation('type', 'image'),
                         new Annotation('app', 'golem-images-0.1'),
                         new Annotation(
                             'filename',
@@ -239,16 +258,24 @@ app.post('/upload', upload.single('imageFile'), async (req, res) => {
                         new Annotation('mime-type', req.file.mimetype),
                         ...stringAnnotations,
                     ],
-                    numericAnnotations: numericAnnotations,
+                    numericAnnotations: [
+                        new Annotation('part', 1),
+                        new Annotation('part-of', chunks.length),
+                        ...numericAnnotations,
+                    ],
                 },
             ]
 
+            console.log('Sending main:')
+            console.log(inspect(creates_main, { depth: 10 }))
             const receipts_main = await client.createEntities(creates_main)
             let hash = receipts_main[0].entityKey
             console.log('Receipts for main:')
             console.log(receipts_main)
 
-            let creates_thumb: GolemBaseCreate[] = [
+            // Now if there are more chunks for the larger files, build creates for them.
+
+            let creates_thumb_and_chunks: GolemBaseCreate[] = [
                 {
                     data: resizedImageBuffer,
                     btl: 25,
@@ -267,13 +294,39 @@ app.post('/upload', upload.single('imageFile'), async (req, res) => {
                 },
             ]
 
-            const receipts_thumb = await client.createEntities(creates_thumb)
+            // Start at index [1] here, since we already saved index [0]
+            for (let i = 1; i < chunks.length; i++) {
+                creates_thumb_and_chunks.push({
+                    data: chunks[0],
+                    btl: 25,
+                    stringAnnotations: [
+                        new Annotation('parent', receipts_main[0].entityKey),
+                        new Annotation('type', 'image_chunk'),
+                        new Annotation('app', 'golem-images-0.1'),
+                        new Annotation(
+                            'filename',
+                            req.body.filename || req.file.originalname
+                        ),
+                        new Annotation('mime-type', req.file.mimetype),
+                        ...stringAnnotations,
+                    ],
+                    numericAnnotations: [
+                        new Annotation('part', i + 1),
+                        new Annotation('part-of', chunks.length),
+                        ...numericAnnotations,
+                    ],
+                })
+            }
+
+            console.log('Sending thumbs and chunks:')
+            const receipts_thumb = await client.createEntities(
+                creates_thumb_and_chunks
+            )
             console.log('Receipts for thumb:')
             console.log(receipts_thumb)
         } catch (e) {
             console.log('ERROR')
             if (e instanceof Error) {
-                console.log(e.message)
                 if ((e as any)?.cause?.details) {
                     throw (e as any).cause.details
                 }
