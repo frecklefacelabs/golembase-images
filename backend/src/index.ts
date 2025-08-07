@@ -147,6 +147,7 @@ app.get('/image/:id', async (req, res) => {
 
     let filename = 'image'
     let mimetype = ''
+    let partof = 1
     for (let annot of metadata.stringAnnotations) {
         if (annot.key == 'filename') {
             filename = annot.value
@@ -154,20 +155,49 @@ app.get('/image/:id', async (req, res) => {
             mimetype = annot.value
         }
     }
+    for (let annot of metadata.numericAnnotations) {
+        if (annot.key == 'part-of') {
+            partof = annot.value
+        }
+    }
+
     console.log(filename)
     console.log(mimetype)
+    console.log(partof)
 
     res.set('Content-Disposition', `inline; filename="${filename}"`)
     res.type(mimetype)
 
     console.log('Fetching raw data...')
 
-    let rawdata = await client.getStorageValue(id as Hex)
+    let result = await client.getStorageValue(id as Hex)
 
-    console.log('sending...')
+    // See if there are more parts.
 
-    res.send(rawdata)
+    // 0x7112367186930e3d80624f326d6666e0369074e642af2d9c6a80dfe1e16cda6f
+    if (partof > 1) {
+        const chunks = [result]
 
+        // The query only gives us the payload and not the metadata, so we'll query them each individually
+        // (Note that we saved the values 1-based not 0-based, so the second has index 2 now)
+
+        for (let i = 2; i <= partof; i++) {
+            const chunk_info = await client.queryEntities(
+                `parent="${id}" && type="image_chunk" && app="golem-images-0.1" && part=${i}`
+            )
+            console.log(`CHUNKS ${i}:`)
+            console.log(chunk_info)
+            chunks.push(chunk_info[0].storageValue)
+        }
+
+        console.log(`SENDING ${chunks.length} chunks`)
+
+        result = Buffer.concat(chunks)
+
+        res.send(result)
+    } else {
+        res.send(result)
+    }
     console.log('Finished sending')
 })
 
@@ -225,7 +255,7 @@ app.post('/upload', upload.single('imageFile'), async (req, res) => {
 
         const chunks: Buffer[] = []
 
-        const chunkSize = 50000
+        const chunkSize = 100000
 
         for (let i = 0; i < originalImageBuffer.length; i += chunkSize) {
             const chunk = Buffer.from(
@@ -240,7 +270,7 @@ app.post('/upload', upload.single('imageFile'), async (req, res) => {
             console.log(chunk.length)
         }
 
-        // --- 4. PREPARE DATA FOR YOUR DATABASE ---
+        // --- 4. PREPARE DATA ---
 
         try {
             // We have to do these creates sequentially, as we need the returned hash to be used in the thumbnail (and additional parts if needed).
@@ -296,26 +326,34 @@ app.post('/upload', upload.single('imageFile'), async (req, res) => {
 
             // Start at index [1] here, since we already saved index [0]
             for (let i = 1; i < chunks.length; i++) {
-                creates_thumb_and_chunks.push({
-                    data: chunks[0],
-                    btl: 25,
-                    stringAnnotations: [
-                        new Annotation('parent', receipts_main[0].entityKey),
-                        new Annotation('type', 'image_chunk'),
-                        new Annotation('app', 'golem-images-0.1'),
-                        new Annotation(
-                            'filename',
-                            req.body.filename || req.file.originalname
-                        ),
-                        new Annotation('mime-type', req.file.mimetype),
-                        ...stringAnnotations,
-                    ],
-                    numericAnnotations: [
-                        new Annotation('part', i + 1),
-                        new Annotation('part-of', chunks.length),
-                        ...numericAnnotations,
-                    ],
-                })
+                const next_create: GolemBaseCreate[] = [
+                    {
+                        data: chunks[i],
+                        btl: 25,
+                        stringAnnotations: [
+                            new Annotation(
+                                'parent',
+                                receipts_main[0].entityKey
+                            ),
+                            new Annotation('type', 'image_chunk'),
+                            new Annotation('app', 'golem-images-0.1'),
+                            new Annotation(
+                                'filename',
+                                req.body.filename || req.file.originalname
+                            ),
+                            new Annotation('mime-type', req.file.mimetype),
+                            ...stringAnnotations,
+                        ],
+                        numericAnnotations: [
+                            new Annotation('part', i + 1),
+                            new Annotation('part-of', chunks.length),
+                            ...numericAnnotations,
+                        ],
+                    },
+                ]
+                const next_receipt = await client.createEntities(next_create)
+                console.log(`Next receipt: (part ${i + 1})`)
+                console.log(next_receipt)
             }
 
             console.log('Sending thumbs and chunks:')
