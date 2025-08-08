@@ -128,6 +128,14 @@ app.get('/', (req, res) => {
 // More:
 // get images within a certain date range (once that's working)
 
+/* DOCUMENTATION
+ * TODO:
+ *   Let's do a writeup on the difference between Uint8Array and Buffer, and how we store the data in Golem in Uint8Array
+ *   and that res.send(data) and fs.writeFile are able to see that it's Uint8Array and build a buffer from it and send it out,
+ *   but sharp doesn't check and needs and actual buffer. Without sharp, we could just rely on res.send and fs.writeFile
+ *   doing what we need them to do without having to worry about the difference.
+ */
+
 const prepend0x = (id: string): Hex => {
     // Prepend '0x' if it's missing
     if (!id.startsWith('0x')) {
@@ -183,7 +191,7 @@ const getFullImage = async (id: Hex) => {
 
     console.log('Fetching raw data...')
 
-    result.image_data = (await client.getStorageValue(id as Hex)) as Buffer
+    result.image_data = Buffer.from(await client.getStorageValue(id as Hex))
 
     // See if there are more parts.
 
@@ -390,7 +398,7 @@ app.post('/upload', upload.single('imageFile'), async (req, res) => {
                             'filename',
                             `thumb_${req.body.filename || req.file.originalname}`
                         ),
-                        new Annotation('mime-type', req.file.mimetype),
+                        new Annotation('mime-type', 'image/jpeg'), // Our thumbnail is jpg
                         ...stringAnnotations,
                     ],
                     numericAnnotations: [],
@@ -447,24 +455,24 @@ app.post('/upload', upload.single('imageFile'), async (req, res) => {
         }
 
         // For testing -- save the files locally
-        // try {
-        //     const timestamp = Date.now() // Create a unique name for each upload
-        //     const originalFilename = `test_output_${timestamp}_original.png`
-        //     const resizedFilename = `test_output_${timestamp}_resized.png`
+        try {
+            const timestamp = Date.now() // Create a unique name for each upload
+            const originalFilename = `test_output_${timestamp}_original.png`
+            const resizedFilename = `test_output_${timestamp}_resized.png`
 
-        //     // Asynchronously write the buffer to a file
-        //     await writeFile(originalFilename, originalImageBuffer)
-        //     console.log(
-        //         `✅ Successfully saved original image to ${originalFilename}`
-        //     )
+            // Asynchronously write the buffer to a file
+            await writeFile(originalFilename, originalImageBuffer)
+            console.log(
+                `✅ Successfully saved original image to ${originalFilename}`
+            )
 
-        //     await writeFile(resizedFilename, resizedImageBuffer)
-        //     console.log(
-        //         `✅ Successfully saved resized image to ${resizedFilename}`
-        //     )
-        // } catch (err) {
-        //     console.error('Error saving files for testing:', err)
-        // }
+            //     await writeFile(resizedFilename, resizedImageBuffer)
+            //     console.log(
+            //         `✅ Successfully saved resized image to ${resizedFilename}`
+            //     )
+        } catch (err) {
+            console.error('Error saving files for testing:', err)
+        }
 
         // --- 5. SEND A SUCCESS RESPONSE ---
         res.status(200).json({
@@ -482,14 +490,74 @@ app.post('/upload', upload.single('imageFile'), async (req, res) => {
     }
 })
 
-app.post('/add-resize/:id', (req, res) => {
+app.post('/add-resize/:id', async (req, res) => {
     let id: Hex = prepend0x(req.params.id)
 
     // Grab image
+    let result: ImageResult = await getFullImage(id)
 
-    console.log(req.params.id)
-    console.log(req.body)
-    res.send(req.body)
+    // It was broken, but Gemini helped me track down the problem by
+    // printing out the following. The second line should be true,
+    // but it was false. That meant I needed to call
+    // Buffer.from(result.image_data) before sending it to Sharp.
+    // (Yet the file saver was able to spot the difference and make
+    // the change accordingly.)
+    console.log('Type of retrieved data:', typeof result.image_data)
+    console.log('Is it a Buffer?', Buffer.isBuffer(result.image_data))
+    console.log('Retrieved data structure:', result.image_data)
+
+    // // For testing -- save the files locally
+    // try {
+    //     console.log('Saving...')
+    //     const timestamp = Date.now() // Create a unique name for each upload
+    //     const originalFilename = `test_output_${timestamp}retrieved.png`
+
+    //     // Asynchronously write the buffer to a file
+    //     await writeFile(originalFilename, result.image_data)
+    //     console.log(
+    //         `✅ Successfully saved original image to ${originalFilename}`
+    //     )
+
+    //     //     await writeFile(resizedFilename, resizedImageBuffer)
+    //     //     console.log(
+    //     //         `✅ Successfully saved resized image to ${resizedFilename}`
+    //     //     )
+    // } catch (err) {
+    //     console.error('Error saving files for testing:', err)
+    // }
+
+    const { width, height } = req.body
+
+    // If the user provides a width but no height, leave height out of params to .resize and let Sharp calculate it.
+    // Similarly with height. If both are provided, tell Sharp to use the "fill" form of fitting in case aspect ratio is different.
+    const resizeOptions: sharp.ResizeOptions = {}
+
+    // Validate that if width/height are provided, they are valid numbers
+    const parsedWidth = width ? parseInt(width, 10) : undefined
+    const parsedHeight = height ? parseInt(height, 10) : undefined
+
+    if (parsedWidth) {
+        resizeOptions.width = parsedWidth
+    }
+
+    if (parsedHeight) {
+        resizeOptions.height = parsedHeight
+    }
+
+    // 4. If both dimensions were provided, add the 'fit' property to enable stretching.
+    if (parsedWidth && parsedHeight) {
+        resizeOptions.fit = 'fill'
+    }
+
+    // Resize using the given parameters
+    const resizedImageBuffer = await sharp(result.image_data)
+        .resize(resizeOptions)
+        .jpeg({ quality: 70 }) // For now we'll just always do jpeg at 70%. In a future version we can ask the user for type/quality
+        .toBuffer()
+    console.log(`Resized image size: ${resizedImageBuffer.length} bytes`)
+
+    res.type('image/jpeg')
+    res.send(resizedImageBuffer)
 })
 
 // Start server
