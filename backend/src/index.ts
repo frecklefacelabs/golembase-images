@@ -128,6 +128,89 @@ app.get('/', (req, res) => {
 // More:
 // get images within a certain date range (once that's working)
 
+const prepend0x = (id: string): Hex => {
+    // Prepend '0x' if it's missing
+    if (!id.startsWith('0x')) {
+        id = '0x' + id
+    }
+
+    return id as Hex
+}
+
+interface ImageResult {
+    id: string | null
+    image_data: Buffer
+    filename: string
+    mimetype: string
+}
+
+const getFullImage = async (id: Hex) => {
+    // For those not familiar with Partial, it's a great way to build up the object as we go
+    // without having to put a bunch of | null's at the end of each type in the Interface
+    // (because we don't want them to be null when we return the object.)
+    // Here's the ref: https://www.typescriptlang.org/docs/handbook/utility-types.html#partialtype
+    let result: Partial<ImageResult> = {
+        id: id,
+        mimetype: '',
+        filename: '',
+    }
+
+    // Grab the metadata
+    const metadata = await client.getEntityMetaData(id as Hex)
+    console.log(metadata)
+
+    // Grab the filename and mime type
+
+    let filename = 'image'
+    let partof = 1
+    for (let annot of metadata.stringAnnotations) {
+        if (annot.key == 'filename') {
+            filename = annot.value
+        } else if (annot.key == 'mime-type') {
+            result.mimetype = annot.value
+        }
+    }
+    for (let annot of metadata.numericAnnotations) {
+        if (annot.key == 'part-of') {
+            partof = annot.value
+        }
+    }
+
+    result.filename = filename
+    console.log(filename)
+    console.log(result.mimetype)
+    console.log(partof)
+
+    console.log('Fetching raw data...')
+
+    result.image_data = (await client.getStorageValue(id as Hex)) as Buffer
+
+    // See if there are more parts.
+
+    // 0x7112367186930e3d80624f326d6666e0369074e642af2d9c6a80dfe1e16cda6f
+    if (partof > 1) {
+        const chunks = [result.image_data]
+
+        // The query only gives us the payload and not the metadata, so we'll query them each individually
+        // (Note that we saved the values 1-based not 0-based, so the second has index 2 now)
+
+        for (let i = 2; i <= partof; i++) {
+            const chunk_info = await client.queryEntities(
+                `parent="${id}" && type="image_chunk" && app="golem-images-0.1" && part=${i}`
+            )
+            console.log(`CHUNKS ${i}:`)
+            console.log(chunk_info)
+            chunks.push(chunk_info[0].storageValue as Buffer)
+        }
+
+        console.log(`SENDING ${chunks.length} chunks`)
+
+        result.image_data = Buffer.concat(chunks)
+    }
+
+    return result as ImageResult
+}
+
 app.get('/thumbnails', async (req, res) => {
     // todo: Consider building an index, as pulling back all the thumbnail data via query is a lot of unnecessary overhead
     const thumbs = await client.queryEntities(
@@ -141,12 +224,7 @@ app.get('/thumbnails', async (req, res) => {
 })
 
 app.get('/parent/:thumbid', async (req, res) => {
-    let id: string = req.params.thumbid
-
-    // Prepend '0x' if it's missing
-    if (!id.startsWith('0x')) {
-        id = '0x' + id
-    }
+    let id: Hex = prepend0x(req.params.thumbid)
 
     // Get the metadata
 
@@ -171,73 +249,12 @@ app.get('/parent/:thumbid', async (req, res) => {
 })
 
 app.get('/image/:id', async (req, res) => {
-    let id: string = req.params.id
+    let id: Hex = prepend0x(req.params.id)
 
-    // Prepend '0x' if it's missing
-    if (!id.startsWith('0x')) {
-        id = '0x' + id
-    }
-
-    // Grab the metadata
-    const metadata = await client.getEntityMetaData(id as Hex)
-    console.log(metadata)
-
-    // Grab the filename and mime type
-
-    let filename = 'image'
-    let mimetype = ''
-    let partof = 1
-    for (let annot of metadata.stringAnnotations) {
-        if (annot.key == 'filename') {
-            filename = annot.value
-        } else if (annot.key == 'mime-type') {
-            mimetype = annot.value
-        }
-    }
-    for (let annot of metadata.numericAnnotations) {
-        if (annot.key == 'part-of') {
-            partof = annot.value
-        }
-    }
-
-    console.log(filename)
-    console.log(mimetype)
-    console.log(partof)
-
-    res.set('Content-Disposition', `inline; filename="${filename}"`)
-    res.type(mimetype)
-
-    console.log('Fetching raw data...')
-
-    let result = await client.getStorageValue(id as Hex)
-
-    // See if there are more parts.
-
-    // 0x7112367186930e3d80624f326d6666e0369074e642af2d9c6a80dfe1e16cda6f
-    if (partof > 1) {
-        const chunks = [result]
-
-        // The query only gives us the payload and not the metadata, so we'll query them each individually
-        // (Note that we saved the values 1-based not 0-based, so the second has index 2 now)
-
-        for (let i = 2; i <= partof; i++) {
-            const chunk_info = await client.queryEntities(
-                `parent="${id}" && type="image_chunk" && app="golem-images-0.1" && part=${i}`
-            )
-            console.log(`CHUNKS ${i}:`)
-            console.log(chunk_info)
-            chunks.push(chunk_info[0].storageValue)
-        }
-
-        console.log(`SENDING ${chunks.length} chunks`)
-
-        result = Buffer.concat(chunks)
-
-        res.send(result)
-    } else {
-        res.send(result)
-    }
-    console.log('Finished sending')
+    let result: ImageResult = await getFullImage(id)
+    res.set('Content-Disposition', `inline; filename="${result.filename}"`)
+    res.type(result.mimetype)
+    res.send(result.image_data)
 })
 
 app.post('/upload', upload.single('imageFile'), async (req, res) => {
@@ -302,6 +319,7 @@ app.post('/upload', upload.single('imageFile'), async (req, res) => {
                 height: 100,
                 fit: 'inside', // This ensures the image is resized to fit within a 100x100 box
             })
+            .jpeg({ quality: 70 })
             .toBuffer()
         console.log(`Resized image size: ${resizedImageBuffer.length} bytes`)
 
@@ -462,6 +480,16 @@ app.post('/upload', upload.single('imageFile'), async (req, res) => {
             `An error occurred while processing the image: ${error}`
         )
     }
+})
+
+app.post('/add-resize/:id', (req, res) => {
+    let id: Hex = prepend0x(req.params.id)
+
+    // Grab image
+
+    console.log(req.params.id)
+    console.log(req.body)
+    res.send(req.body)
 })
 
 // Start server
