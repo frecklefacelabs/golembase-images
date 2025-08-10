@@ -290,13 +290,13 @@ app.post('/upload', upload.single('imageFile'), async (req, res) => {
         let stringAnnotations = []
         let numericAnnotations = []
 
-        // Add each tag individually.
+        // Add each tag as an annotation.
         const tag_list = tags
             .split(',') // split by commas
             .map((tag) => tag.trim()) // remove leading/trailing space
             .filter((tag) => tag.length > 0) // remove empty strings resulting from multiple commas
         for (let tag of tag_list) {
-            stringAnnotations.push(new Annotation('key', tag))
+            stringAnnotations.push(new Annotation('tag', tag))
         }
 
         for (let i = 1; i <= 3; i++) {
@@ -384,9 +384,7 @@ app.post('/upload', upload.single('imageFile'), async (req, res) => {
             console.log(receipts_main)
             entity_key = receipts_main[0].entityKey
 
-            // Now if there are more chunks for the larger files, build creates for them.
-
-            let creates_thumb_and_chunks: GolemBaseCreate[] = [
+            let create_thumb: GolemBaseCreate[] = [
                 {
                     data: resizedImageBuffer,
                     btl: 25,
@@ -394,6 +392,7 @@ app.post('/upload', upload.single('imageFile'), async (req, res) => {
                         new Annotation('parent', receipts_main[0].entityKey),
                         new Annotation('type', 'thumbnail'),
                         new Annotation('app', 'golem-images-0.1'),
+                        new Annotation('resize', '100x100'),
                         new Annotation(
                             'filename',
                             `thumb_${req.body.filename || req.file.originalname}`
@@ -404,6 +403,8 @@ app.post('/upload', upload.single('imageFile'), async (req, res) => {
                     numericAnnotations: [],
                 },
             ]
+
+            // Now if there are more chunks for the larger files, build creates for them.
 
             // Start at index [1] here, since we already saved index [0]
             for (let i = 1; i < chunks.length; i++) {
@@ -438,9 +439,7 @@ app.post('/upload', upload.single('imageFile'), async (req, res) => {
             }
 
             console.log('Sending thumbs and chunks:')
-            const receipts_thumb = await client.createEntities(
-                creates_thumb_and_chunks
-            )
+            const receipts_thumb = await client.createEntities(create_thumb)
             console.log('Receipts for thumb:')
             console.log(receipts_thumb)
         } catch (e) {
@@ -454,25 +453,25 @@ app.post('/upload', upload.single('imageFile'), async (req, res) => {
             }
         }
 
-        // For testing -- save the files locally
-        try {
-            const timestamp = Date.now() // Create a unique name for each upload
-            const originalFilename = `test_output_${timestamp}_original.png`
-            const resizedFilename = `test_output_${timestamp}_resized.png`
+        // // For testing -- save the files locally
+        // try {
+        //     const timestamp = Date.now() // Create a unique name for each upload
+        //     const originalFilename = `test_output_${timestamp}_original.png`
+        //     const resizedFilename = `test_output_${timestamp}_resized.png`
 
-            // Asynchronously write the buffer to a file
-            await writeFile(originalFilename, originalImageBuffer)
-            console.log(
-                `✅ Successfully saved original image to ${originalFilename}`
-            )
+        //     // Asynchronously write the buffer to a file
+        //     await writeFile(originalFilename, originalImageBuffer)
+        //     console.log(
+        //         `✅ Successfully saved original image to ${originalFilename}`
+        //     )
 
-            //     await writeFile(resizedFilename, resizedImageBuffer)
-            //     console.log(
-            //         `✅ Successfully saved resized image to ${resizedFilename}`
-            //     )
-        } catch (err) {
-            console.error('Error saving files for testing:', err)
-        }
+        //     //     await writeFile(resizedFilename, resizedImageBuffer)
+        //     //     console.log(
+        //     //         `✅ Successfully saved resized image to ${resizedFilename}`
+        //     //     )
+        // } catch (err) {
+        //     console.error('Error saving files for testing:', err)
+        // }
 
         // --- 5. SEND A SUCCESS RESPONSE ---
         res.status(200).json({
@@ -496,58 +495,65 @@ app.post('/add-resize/:id', async (req, res) => {
     // Grab image
     let result: ImageResult = await getFullImage(id)
 
+    // Get the dimensions of the original
+    const image_meta = await sharp(result.image_data).metadata()
+    const original_width = image_meta.width
+    const original_height = image_meta.height
+
     // It was broken, but Gemini helped me track down the problem by
     // printing out the following. The second line should be true,
     // but it was false. That meant I needed to call
     // Buffer.from(result.image_data) before sending it to Sharp.
     // (Yet the file saver was able to spot the difference and make
     // the change accordingly.)
-    console.log('Type of retrieved data:', typeof result.image_data)
-    console.log('Is it a Buffer?', Buffer.isBuffer(result.image_data))
-    console.log('Retrieved data structure:', result.image_data)
-
-    // // For testing -- save the files locally
-    // try {
-    //     console.log('Saving...')
-    //     const timestamp = Date.now() // Create a unique name for each upload
-    //     const originalFilename = `test_output_${timestamp}retrieved.png`
-
-    //     // Asynchronously write the buffer to a file
-    //     await writeFile(originalFilename, result.image_data)
-    //     console.log(
-    //         `✅ Successfully saved original image to ${originalFilename}`
-    //     )
-
-    //     //     await writeFile(resizedFilename, resizedImageBuffer)
-    //     //     console.log(
-    //     //         `✅ Successfully saved resized image to ${resizedFilename}`
-    //     //     )
-    // } catch (err) {
-    //     console.error('Error saving files for testing:', err)
-    // }
+    // console.log('Type of retrieved data:', typeof result.image_data)
+    // console.log('Is it a Buffer?', Buffer.isBuffer(result.image_data))
+    // console.log('Retrieved data structure:', result.image_data)
 
     const { width, height } = req.body
 
     // If the user provides a width but no height, leave height out of params to .resize and let Sharp calculate it.
     // Similarly with height. If both are provided, tell Sharp to use the "fill" form of fitting in case aspect ratio is different.
     const resizeOptions: sharp.ResizeOptions = {}
+    let finalWidth: number = 0
+    let finalHeight: number = 0
 
     // Validate that if width/height are provided, they are valid numbers
     const parsedWidth = width ? parseInt(width, 10) : undefined
     const parsedHeight = height ? parseInt(height, 10) : undefined
 
-    if (parsedWidth) {
-        resizeOptions.width = parsedWidth
-    }
-
-    if (parsedHeight) {
-        resizeOptions.height = parsedHeight
-    }
-
-    // 4. If both dimensions were provided, add the 'fit' property to enable stretching.
+    // Figure out which options to fill in, while also figure out the "WxH" string to save with the golem metadata
     if (parsedWidth && parsedHeight) {
+        // Case 1: Both width and height are provided (stretch/fill)
+        resizeOptions.width = parsedWidth
+        resizeOptions.height = parsedHeight
         resizeOptions.fit = 'fill'
+
+        finalWidth = parsedWidth
+        finalHeight = parsedHeight
+    } else if (parsedWidth) {
+        // Case 2: Only width is provided
+        resizeOptions.width = parsedWidth
+        finalWidth = parsedWidth
+        const aspectRatio = original_height / original_width
+        finalHeight = Math.round(parsedWidth * aspectRatio)
+    } else if (parsedHeight) {
+        // Case 3: Only height is provided
+        resizeOptions.height = parsedHeight
+        finalHeight = parsedHeight
+        const aspectRatio = original_width / original_height
+        finalWidth = Math.round(parsedHeight * aspectRatio)
+    } else {
+        // Case 4: Neither is provided (no resize)
+        console.log('Case: No dimensions provided.')
+        finalWidth = original_width
+        finalHeight = original_height
     }
+
+    const resolutionString = `${finalWidth}x${finalHeight}`
+    console.log(resolutionString)
+
+    // Check if this image already exists
 
     // Resize using the given parameters
     const resizedImageBuffer = await sharp(result.image_data)
@@ -558,6 +564,19 @@ app.post('/add-resize/:id', async (req, res) => {
 
     res.type('image/jpeg')
     res.send(resizedImageBuffer)
+})
+
+// Search -- by tag, but really anything
+// Feature request for Golem-base -- search and only return the IDs and not payloads, search and return IDs and metadata but not payload
+app.get('/query/:search', async (req, res) => {
+    const results = await client.queryEntities(
+        `type="thumbnail" && app="golem-images-0.1" && tag="${req.params.search}"`
+    )
+    res.send(
+        results.map((item) => {
+            return item.entityKey
+        })
+    )
 })
 
 // Start server
