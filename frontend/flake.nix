@@ -12,14 +12,11 @@
   outputs = { self, nixpkgs }: {
     devShells.x86_64-linux.default = nixpkgs.legacyPackages.x86_64-linux.mkShell {
       # The `buildInputs` are the packages available in your shell.
-      buildInputs = [
+      buildInputs = with nixpkgs.legacyPackages.x86_64-linux; [
         # Use nodejs-24_x for Node.js version 24.
-        nixpkgs.legacyPackages.x86_64-linux.nodejs-24_x
-        # npm is included with the nodejs package, but this makes it explicit.
-        # It's a good practice to include it if you're using it.
-        nixpkgs.legacyPackages.x86_64-linux.npm
-        # Add the Angular CLI package to the environment
-        nixpkgs.legacyPackages.x86_64-linux.angular-cli
+        nodejs_24
+        # We use the nodePackages attribute set to get the Angular CLI.
+        nodePackages."@angular/cli"
       ];
 
       # This is a hook that runs when you enter the shell.
@@ -30,11 +27,10 @@
     
     # We also provide a devShell for aarch64-darwin (Apple Silicon)
     devShells.aarch64-darwin.default = nixpkgs.legacyPackages.aarch64-darwin.mkShell {
-      buildInputs = [
-        nixpkgs.legacyPackages.aarch64-darwin.nodejs-24_x
-        nixpkgs.legacyPackages.aarch64-darwin.npm
-        # Add the Angular CLI package to the environment
-        nixpkgs.legacyPackages.aarch64-darwin.angular-cli
+      buildInputs = with nixpkgs.legacyPackages.aarch64-darwin; [
+        nodejs-24_x
+        npm
+        nodePackages."@angular/cli"
       ];
 
       shellHook = ''
